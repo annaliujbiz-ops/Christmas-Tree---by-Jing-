@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>赛博圣诞树</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&display=swap');
+        body { margin: 0; overflow: hidden; background-color: #000502; font-family: 'Orbitron', sans-serif; color: white; }
+        #canvas-container { position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; z-index: 1; }
+        #webcam { display: none; }
+        #ui-panel { position: absolute; top: 20px; right: 20px; width: 260px; background: rgba(16, 20, 18, 0.7); backdrop-filter: blur(12px); border: 1px solid rgba(0, 255, 136, 0.3); border-radius: 12px; padding: 20px; z-index: 10; }
+        h2 { margin: 0 0 15px 0; font-size: 16px; color: #00ff88; text-align: center; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 10px; }
+        .btn-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin-bottom: 15px; }
+        button { background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.2); color: white; padding: 8px; cursor: pointer; border-radius: 5px; font-size: 10px; transition: 0.2s; }
+        button.active { background: rgba(0,255,136,0.3); border-color: #00ff88; color: #00ff88; }
+        #loading { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); color: #ffd700; z-index: 20; text-align: center; pointer-events: none;}
+        #tips { position: absolute; bottom: 20px; width: 100%; text-align: center; color: #00ff88; z-index: 10; font-size: 12px; pointer-events: none; opacity: 0.8; }
+    </style>
+    <script type="importmap">
+    { "imports": {
+        "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+        "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/",
+        "@mediapipe/tasks-vision": "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/+esm"
+    }}
+    </script>
+</head>
+<body>
+    <div id="loading">正在启动系统...<br>请允许摄像头权限</div>
+    <div id="ui-panel">
+        <h2>模式选择</h2>
+        <div class="btn-grid">
+            <button class="active" onclick="setShape('tree')">圣诞树</button>
+            <button onclick="setShape('heart')">爱心</button>
+            <button onclick="setShape('star')">星星</button>
+            <button onclick="setShape('chaos')">星云爆炸</button>
+        </div>
+        <div style="font-size:12px; color:#aaa; margin-bottom:5px;">粒子颜色</div>
+        <input type="color" id="colorPicker" value="#00ff88" style="width:100%; border:none; height:30px;">
+    </div>
+    <div id="tips">手势控制：张开手掌=扩散 | 握拳=聚合</div>
+    <div id="canvas-container"></div>
+    <video id="webcam" autoplay playsinline></video>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+        import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+        import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+        import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+        import { FilesetResolver, HandLandmarker } from '@mediapipe/tasks-vision';
+
+        let scene, camera, renderer, composer, particles, geometry;
+        let handLandmarker, video;
+        let particleCount = 4000; // 粒子数量
+        const shapes = { tree: [], heart: [], star: [], chaos: [] };
+        let currentShape = 'tree';
+        let morphFactor = 0; let targetMorph = 0; // 0=Formed, 1=Chaos
+
+        async function init() {
+            // 1. Scene
+            scene = new THREE.Scene();
+            scene.fog = new THREE.FogExp2(0x000502, 0.03);
+            camera = new THREE.PerspectiveCamera(60, window.innerWidth/window.innerHeight, 0.1, 1000);
+            camera.position.set(0, 10, 35);
+            
+            renderer = new THREE.WebGLRenderer({antialias:false});
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+            document.getElementById('canvas-container').appendChild(renderer.domElement);
+
+            // 2. Post Processing (Bloom)
+            const renderScene = new RenderPass(scene, camera);
+            const bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 1.5, 0.4, 0.85);
+            bloomPass.threshold = 0.2; bloomPass.strength = 1.5; bloomPass.radius = 0.5;
+            composer = new EffectComposer(renderer);
+            composer.addPass(renderScene); composer.addPass(bloomPass);
+
+            new OrbitControls(camera, renderer.domElement).enableDamping = true;
+
+            // 3. Particles
+            calcShapes();
+            geometry = new THREE.BufferGeometry();
+            const pos = new Float32Array(particleCount * 3);
+            const col = new Float32Array(particleCount * 3);
+            
+            for(let i=0; i<particleCount*3; i++) pos[i] = shapes.tree[i];
+            geometry.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+            geometry.setAttribute('color', new THREE.BufferAttribute(col, 3));
+            updateColors('#00ff88');
+
+            const mat = new THREE.PointsMaterial({
+                size: 0.8, vertexColors: true, blending: THREE.AdditiveBlending,
+                depthWrite: false, transparent: true, opacity: 0.8
+            });
+            particles = new THREE.Points(geometry, mat);
+            scene.add(particles);
+
+            // 4. AI
+            const vision = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm");
+            handLandmarker = await HandLandmarker.createFromOptions(vision, {
+                baseOptions: { modelAssetPath: "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task", delegate: "GPU" },
+                runningMode: "VIDEO", numHands: 1
+            });
+            video = document.getElementById('webcam');
+            navigator.mediaDevices.getUserMedia({video:true}).then(stream => {
+                video.srcObject = stream;
+                video.addEventListener('loadeddata', predict);
+                document.getElementById('loading').style.display = 'none';
+            });
+
+            animate();
+            window.addEventListener('resize', () => {
+                camera.aspect = window.innerWidth/window.innerHeight;
+                camera.updateProjectionMatrix();
+                renderer.setSize(window.innerWidth, window.innerHeight);
+                composer.setSize(window.innerWidth, window.innerHeight);
+            });
+        }
+
+        function calcShapes() {
+            for(let i=0; i<particleCount; i++) {
+                const i3 = i*3;
+                // Tree
+                const h = 30, y = Math.random()*h - h/2, r = (1 - (y+h/2)/h) * 10 * Math.sqrt(Math.random()), t = Math.random()*20;
+                shapes.tree[i3] = r*Math.cos(t); shapes.tree[i3+1] = y; shapes.tree[i3+2] = r*Math.sin(t);
+                // Heart
+                const hr = Math.random(), ht = Math.random()*Math.PI*2, hs = 0.8;
+                shapes.heart[i3] = hs*hr*16*Math.pow(Math.sin(ht),3); 
+                shapes.heart[i3+1] = hs*hr*(13*Math.cos(ht)-5*Math.cos(2*ht)-2*Math.cos(3*ht)-Math.cos(4*ht)); 
+                shapes.heart[i3+2] = (Math.random()-0.5)*2;
+                // Star
+                const st = (i%5)*(Math.PI*2/5) + Math.random()*0.5, sr = Math.random()*15;
+                shapes.star[i3] = sr*Math.cos(st); shapes.star[i3+1] = sr*Math.sin(st); shapes.star[i3+2] = (Math.random()-0.5)*2;
+                // Chaos
+                const u=Math.random(), v=Math.random(), phi=Math.acos(2*v-1), rot=2*Math.PI*u, cr=Math.cbrt(Math.random())*25;
+                shapes.chaos[i3] = cr*Math.sin(phi)*Math.cos(rot); shapes.chaos[i3+1] = cr*Math.sin(phi)*Math.sin(rot); shapes.chaos[i3+2] = cr*Math.cos(phi);
+            }
+        }
+
+        function updateColors(hex) {
+            const c = new THREE.Color(hex);
+            const arr = geometry.attributes.color.array;
+            for(let i=0; i<particleCount; i++) {
+                const mix = Math.random()>0.8 ? new THREE.Color(0xffd700) : c;
+                arr[i*3]=mix.r; arr[i*3+1]=mix.g; arr[i*3+2]=mix.b;
+            }
+            geometry.attributes.color.needsUpdate = true;
+        }
+
+        let lastTime = -1;
+        async function predict() {
+            if(video.currentTime !== lastTime) {
+                lastTime = video.currentTime;
+                const res = handLandmarker.detectForVideo(video, performance.now());
+                if(res.landmarks.length > 0) {
+                    // Check open hand
+                    const lm = res.landmarks[0], wrist = lm[0];
+                    let d = 0; [4,8,12,16,20].forEach(tip => d += Math.sqrt((lm[tip].x-wrist.x)**2 + (lm[tip].y-wrist.y)**2));
+                    targetMorph = (d/5 > 0.3) ? 1 : 0; 
+                } else targetMorph = 0;
+            }
+            requestAnimationFrame(predict);
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            morphFactor += (targetMorph - morphFactor) * 0.1;
+            
+            const pos = geometry.attributes.position.array;
+            const cur = shapes[currentShape], chaos = shapes.chaos;
+            const time = Date.now()*0.001;
+
+            for(let i=0; i<particleCount; i++) {
+                const i3=i*3;
+                const tx = cur[i3] + (chaos[i3]-cur[i3])*morphFactor;
+                const ty = cur[i3+1] + (chaos[i3+1]-cur[i3+1])*morphFactor;
+                const tz = cur[i3+2] + (chaos[i3+2]-cur[i3+2])*morphFactor;
+                pos[i3] = tx; pos[i3+1] = ty + Math.sin(time+i)*0.1; pos[i3+2] = tz;
+            }
+            geometry.attributes.position.needsUpdate = true;
+            particles.rotation.y = time*0.2;
+            composer.render();
+        }
+
+        window.setShape = (s) => { 
+            currentShape = s; 
+            document.querySelectorAll('button').forEach(b => b.classList.remove('active'));
+            event.target.classList.add('active');
+        };
+        document.getElementById('colorPicker').addEventListener('input', (e)=>updateColors(e.target.value));
+        
+        init();
+    </script>
+</body>
+</html>
