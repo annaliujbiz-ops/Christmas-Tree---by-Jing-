@@ -1,196 +1,230 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>赛博圣诞树</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"> <!-- 适配手机屏幕 -->
+    <title>Jing的魔法圣诞树</title>
     <style>
-        @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&display=swap');
-        body { margin: 0; overflow: hidden; background-color: #000502; font-family: 'Orbitron', sans-serif; color: white; }
-        #canvas-container { position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; z-index: 1; }
+        /* 1. 基础样式：黑色背景，无滚动条 */
+        body { margin: 0; overflow: hidden; background-color: #000; color: white; font-family: sans-serif; }
+        
+        /* 2. 加载提示字样 */
+        #loading {
+            position: absolute; top: 50%; left: 50%; 
+            transform: translate(-50%, -50%);
+            text-align: center; font-size: 18px; color: #ffd700;
+            pointer-events: none; z-index: 999;
+        }
+
+        /* 3. 简单的按钮面板 */
+        #ui {
+            position: absolute; top: 20px; right: 20px; z-index: 100;
+            background: rgba(255, 255, 255, 0.1); padding: 10px; border-radius: 8px;
+        }
+        button {
+            background: #333; color: white; border: 1px solid #555;
+            padding: 8px 15px; margin: 5px; cursor: pointer; border-radius: 4px;
+        }
+        button:active { background: #00ff88; color: black; }
+
+        /* 4. 隐藏原始摄像头画面，只留特效 */
         #webcam { display: none; }
-        #ui-panel { position: absolute; top: 20px; right: 20px; width: 260px; background: rgba(16, 20, 18, 0.7); backdrop-filter: blur(12px); border: 1px solid rgba(0, 255, 136, 0.3); border-radius: 12px; padding: 20px; z-index: 10; }
-        h2 { margin: 0 0 15px 0; font-size: 16px; color: #00ff88; text-align: center; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 10px; }
-        .btn-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin-bottom: 15px; }
-        button { background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.2); color: white; padding: 8px; cursor: pointer; border-radius: 5px; font-size: 10px; transition: 0.2s; }
-        button.active { background: rgba(0,255,136,0.3); border-color: #00ff88; color: #00ff88; }
-        #loading { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); color: #ffd700; z-index: 20; text-align: center; pointer-events: none;}
-        #tips { position: absolute; bottom: 20px; width: 100%; text-align: center; color: #00ff88; z-index: 10; font-size: 12px; pointer-events: none; opacity: 0.8; }
     </style>
+
+    <!-- 5. 引入 3D 引擎 (Three.js) 和 AI (MediaPipe) -->
     <script type="importmap">
-    { "imports": {
-        "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
-        "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/",
-        "@mediapipe/tasks-vision": "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/+esm"
-    }}
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/",
+                "@mediapipe/tasks-vision": "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/+esm"
+            }
+        }
     </script>
 </head>
 <body>
-    <div id="loading">正在启动系统...<br>请允许摄像头权限</div>
-    <div id="ui-panel">
-        <h2>模式选择</h2>
-        <div class="btn-grid">
-            <button class="active" onclick="setShape('tree')">圣诞树</button>
-            <button onclick="setShape('heart')">爱心</button>
-            <button onclick="setShape('star')">星星</button>
-            <button onclick="setShape('chaos')">星云爆炸</button>
-        </div>
-        <div style="font-size:12px; color:#aaa; margin-bottom:5px;">粒子颜色</div>
-        <input type="color" id="colorPicker" value="#00ff88" style="width:100%; border:none; height:30px;">
+
+    <!-- 界面元素 -->
+    <div id="loading">🎄 正在种植圣诞树...<br><span style="font-size:12px;color:#aaa">首次加载可能需要 20 秒</span></div>
+    
+    <div id="ui">
+        <button onclick="window.location.reload()">🔄 刷新重置</button>
     </div>
-    <div id="tips">手势控制：张开手掌=扩散 | 握拳=聚合</div>
+
+    <!-- 3D 画布容器 -->
     <div id="canvas-container"></div>
+    <!-- 摄像头源 -->
     <video id="webcam" autoplay playsinline></video>
 
+    <!-- 核心逻辑脚本 -->
     <script type="module">
         import * as THREE from 'three';
         import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-        import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
-        import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
-        import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
         import { FilesetResolver, HandLandmarker } from '@mediapipe/tasks-vision';
 
-        let scene, camera, renderer, composer, particles, geometry;
-        let handLandmarker, video;
-        let particleCount = 4000; // 粒子数量
-        const shapes = { tree: [], heart: [], star: [], chaos: [] };
-        let currentShape = 'tree';
-        let morphFactor = 0; let targetMorph = 0; // 0=Formed, 1=Chaos
+        // 变量准备
+        let scene, camera, renderer, particles;
+        const particleCount = 4000; // 粒子数量
+        const positions = new Float32Array(particleCount * 3); // 粒子位置
+        const originalPositions = new Float32Array(particleCount * 3); // 记住树的形状
+        const colors = new Float32Array(particleCount * 3); // 粒子颜色
+        let targetSpread = 0; // 0=树形态, 1=炸开形态
+        let currentSpread = 0;
 
-        async function init() {
-            // 1. Scene
+        // --- 第一步：搭建 3D 舞台 ---
+        function initScene() {
             scene = new THREE.Scene();
-            scene.fog = new THREE.FogExp2(0x000502, 0.03);
-            camera = new THREE.PerspectiveCamera(60, window.innerWidth/window.innerHeight, 0.1, 1000);
-            camera.position.set(0, 10, 35);
-            
-            renderer = new THREE.WebGLRenderer({antialias:false});
+            scene.fog = new THREE.FogExp2(0x000000, 0.02); // 黑色迷雾
+
+            camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.set(0, 10, 35); // 相机位置
+
+            renderer = new THREE.WebGLRenderer({ antialias: true });
             renderer.setSize(window.innerWidth, window.innerHeight);
-            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
             document.getElementById('canvas-container').appendChild(renderer.domElement);
 
-            // 2. Post Processing (Bloom)
-            const renderScene = new RenderPass(scene, camera);
-            const bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 1.5, 0.4, 0.85);
-            bloomPass.threshold = 0.2; bloomPass.strength = 1.5; bloomPass.radius = 0.5;
-            composer = new EffectComposer(renderer);
-            composer.addPass(renderScene); composer.addPass(bloomPass);
+            // 允许鼠标旋转
+            const controls = new OrbitControls(camera, renderer.domElement);
+            controls.enableDamping = true;
+            controls.autoRotate = true;
+            controls.autoRotateSpeed = 1.0;
 
-            new OrbitControls(camera, renderer.domElement).enableDamping = true;
-
-            // 3. Particles
-            calcShapes();
-            geometry = new THREE.BufferGeometry();
-            const pos = new Float32Array(particleCount * 3);
-            const col = new Float32Array(particleCount * 3);
-            
-            for(let i=0; i<particleCount*3; i++) pos[i] = shapes.tree[i];
-            geometry.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-            geometry.setAttribute('color', new THREE.BufferAttribute(col, 3));
-            updateColors('#00ff88');
-
-            const mat = new THREE.PointsMaterial({
-                size: 0.8, vertexColors: true, blending: THREE.AdditiveBlending,
-                depthWrite: false, transparent: true, opacity: 0.8
-            });
-            particles = new THREE.Points(geometry, mat);
-            scene.add(particles);
-
-            // 4. AI
-            const vision = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm");
-            handLandmarker = await HandLandmarker.createFromOptions(vision, {
-                baseOptions: { modelAssetPath: "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task", delegate: "GPU" },
-                runningMode: "VIDEO", numHands: 1
-            });
-            video = document.getElementById('webcam');
-            navigator.mediaDevices.getUserMedia({video:true}).then(stream => {
-                video.srcObject = stream;
-                video.addEventListener('loadeddata', predict);
-                document.getElementById('loading').style.display = 'none';
-            });
-
-            animate();
+            // 窗口大小改变时自动调整
             window.addEventListener('resize', () => {
-                camera.aspect = window.innerWidth/window.innerHeight;
+                camera.aspect = window.innerWidth / window.innerHeight;
                 camera.updateProjectionMatrix();
                 renderer.setSize(window.innerWidth, window.innerHeight);
-                composer.setSize(window.innerWidth, window.innerHeight);
             });
         }
 
-        function calcShapes() {
-            for(let i=0; i<particleCount; i++) {
-                const i3 = i*3;
-                // Tree
-                const h = 30, y = Math.random()*h - h/2, r = (1 - (y+h/2)/h) * 10 * Math.sqrt(Math.random()), t = Math.random()*20;
-                shapes.tree[i3] = r*Math.cos(t); shapes.tree[i3+1] = y; shapes.tree[i3+2] = r*Math.sin(t);
-                // Heart
-                const hr = Math.random(), ht = Math.random()*Math.PI*2, hs = 0.8;
-                shapes.heart[i3] = hs*hr*16*Math.pow(Math.sin(ht),3); 
-                shapes.heart[i3+1] = hs*hr*(13*Math.cos(ht)-5*Math.cos(2*ht)-2*Math.cos(3*ht)-Math.cos(4*ht)); 
-                shapes.heart[i3+2] = (Math.random()-0.5)*2;
-                // Star
-                const st = (i%5)*(Math.PI*2/5) + Math.random()*0.5, sr = Math.random()*15;
-                shapes.star[i3] = sr*Math.cos(st); shapes.star[i3+1] = sr*Math.sin(st); shapes.star[i3+2] = (Math.random()-0.5)*2;
-                // Chaos
-                const u=Math.random(), v=Math.random(), phi=Math.acos(2*v-1), rot=2*Math.PI*u, cr=Math.cbrt(Math.random())*25;
-                shapes.chaos[i3] = cr*Math.sin(phi)*Math.cos(rot); shapes.chaos[i3+1] = cr*Math.sin(phi)*Math.sin(rot); shapes.chaos[i3+2] = cr*Math.cos(phi);
+        // --- 第二步：种下圣诞树 (粒子生成) ---
+        function createTree() {
+            const geometry = new THREE.BufferGeometry();
+
+            for (let i = 0; i < particleCount; i++) {
+                // 树的形状算法 (圆锥体)
+                const h = 35; // 树高
+                const y = Math.random() * h - h / 2; // 高度范围
+                const radius = (1 - (y + h / 2) / h) * 12; // 下面宽上面窄
+                const angle = Math.random() * Math.PI * 2; // 360度旋转
+                const r = radius * Math.sqrt(Math.random()); // 内部填充
+
+                const x = r * Math.cos(angle);
+                const z = r * Math.sin(angle);
+
+                // 记录位置
+                positions[i * 3] = x;
+                positions[i * 3 + 1] = y;
+                positions[i * 3 + 2] = z;
+
+                originalPositions[i * 3] = x;
+                originalPositions[i * 3 + 1] = y;
+                originalPositions[i * 3 + 2] = z;
+
+                // 颜色：混入金色和绿色
+                const color = Math.random() > 0.8 ? new THREE.Color(0xffd700) : new THREE.Color(0x00ff88);
+                colors[i * 3] = color.r;
+                colors[i * 3 + 1] = color.g;
+                colors[i * 3 + 2] = color.b;
             }
+
+            geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+            geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+            // 材质：发光的小点
+            const material = new THREE.PointsMaterial({
+                size: 0.6,
+                vertexColors: true,
+                blending: THREE.AdditiveBlending,
+                transparent: true,
+                opacity: 0.9
+            });
+
+            particles = new THREE.Points(geometry, material);
+            scene.add(particles);
         }
 
-        function updateColors(hex) {
-            const c = new THREE.Color(hex);
-            const arr = geometry.attributes.color.array;
-            for(let i=0; i<particleCount; i++) {
-                const mix = Math.random()>0.8 ? new THREE.Color(0xffd700) : c;
-                arr[i*3]=mix.r; arr[i*3+1]=mix.g; arr[i*3+2]=mix.b;
-            }
-            geometry.attributes.color.needsUpdate = true;
-        }
-
-        let lastTime = -1;
-        async function predict() {
-            if(video.currentTime !== lastTime) {
-                lastTime = video.currentTime;
-                const res = handLandmarker.detectForVideo(video, performance.now());
-                if(res.landmarks.length > 0) {
-                    // Check open hand
-                    const lm = res.landmarks[0], wrist = lm[0];
-                    let d = 0; [4,8,12,16,20].forEach(tip => d += Math.sqrt((lm[tip].x-wrist.x)**2 + (lm[tip].y-wrist.y)**2));
-                    targetMorph = (d/5 > 0.3) ? 1 : 0; 
-                } else targetMorph = 0;
-            }
-            requestAnimationFrame(predict);
-        }
-
+        // --- 第三步：动画循环 (让它动起来) ---
         function animate() {
             requestAnimationFrame(animate);
-            morphFactor += (targetMorph - morphFactor) * 0.1;
-            
-            const pos = geometry.attributes.position.array;
-            const cur = shapes[currentShape], chaos = shapes.chaos;
-            const time = Date.now()*0.001;
 
-            for(let i=0; i<particleCount; i++) {
-                const i3=i*3;
-                const tx = cur[i3] + (chaos[i3]-cur[i3])*morphFactor;
-                const ty = cur[i3+1] + (chaos[i3+1]-cur[i3+1])*morphFactor;
-                const tz = cur[i3+2] + (chaos[i3+2]-cur[i3+2])*morphFactor;
-                pos[i3] = tx; pos[i3+1] = ty + Math.sin(time+i)*0.1; pos[i3+2] = tz;
+            // 平滑过渡动画
+            currentSpread += (targetSpread - currentSpread) * 0.1;
+
+            for (let i = 0; i < particleCount; i++) {
+                const i3 = i * 3;
+                const ox = originalPositions[i3];
+                const oy = originalPositions[i3 + 1];
+                const oz = originalPositions[i3 + 2];
+
+                // 爆炸逻辑：位置 = 原始位置 * (1 + 扩散系数)
+                const explosion = 1 + currentSpread * 2; 
+
+                positions[i3] = ox * explosion;
+                positions[i3 + 1] = oy * explosion;
+                positions[i3 + 2] = oz * explosion;
             }
-            geometry.attributes.position.needsUpdate = true;
-            particles.rotation.y = time*0.2;
-            composer.render();
+            
+            particles.geometry.attributes.position.needsUpdate = true;
+            renderer.render(scene, camera);
         }
 
-        window.setShape = (s) => { 
-            currentShape = s; 
-            document.querySelectorAll('button').forEach(b => b.classList.remove('active'));
-            event.target.classList.add('active');
-        };
-        document.getElementById('colorPicker').addEventListener('input', (e)=>updateColors(e.target.value));
-        
-        init();
+        // --- 第四步：启动 AI 摄像头 (最难的一步，加了保险) ---
+        async function startAI() {
+            try {
+                const vision = await FilesetResolver.forVisionTasks(
+                    "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm"
+                );
+                const handLandmarker = await HandLandmarker.createFromOptions(vision, {
+                    baseOptions: {
+                        modelAssetPath: "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
+                        delegate: "GPU"
+                    },
+                    runningMode: "VIDEO",
+                    numHands: 1
+                });
+
+                const video = document.getElementById('webcam');
+                // 请求摄像头
+                const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+                video.srcObject = stream;
+
+                document.getElementById('loading').innerHTML = "✅ 系统启动成功！<br>请对着摄像头<br>张开手掌 = 爆炸 | 握拳 = 还原";
+                
+                // 开始持续检测
+                let lastTime = -1;
+                function predict() {
+                    if (video.currentTime !== lastTime) {
+                        lastTime = video.currentTime;
+                        const result = handLandmarker.detectForVideo(video, performance.now());
+                        
+                        if (result.landmarks.length > 0) {
+                            // 检测到手了！
+                            const hand = result.landmarks[0];
+                            // 简单算法：食指指尖 (8) 到 手腕 (0) 的距离
+                            const tip = hand[8];
+                            const wrist = hand[0];
+                            const dist = Math.sqrt(Math.pow(tip.x - wrist.x, 2) + Math.pow(tip.y - wrist.y, 2));
+
+                            // 距离大于 0.3 算张开，否则算握拳
+                            targetSpread = dist > 0.3 ? 1 : 0;
+                        }
+                    }
+                    requestAnimationFrame(predict);
+                }
+                predict();
+
+            } catch (error) {
+                console.error(error);
+                document.getElementById('loading').innerHTML = "❌ 摄像头启动失败<br>请检查权限，或换个浏览器(推荐Chrome)";
+            }
+        }
+
+        // --- 启动所有程序 ---
+        initScene();
+        createTree();
+        animate();
+        startAI(); // 启动 AI
     </script>
 </body>
 </html>
